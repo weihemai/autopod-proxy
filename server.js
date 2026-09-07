@@ -38,7 +38,7 @@ function corsHeaders(extra={}){
   return {
     'Access-Control-Allow-Origin': '*',
     'Access-Control-Allow-Methods': 'GET, OPTIONS',
-    'Access-Control-Allow-Headers': 'Content-Type, Range',
+    'Access-Control-Allow-Headers': 'Content-Type, Range, Authorization',
     'Access-Control-Expose-Headers': 'Content-Range, Accept-Ranges, Content-Length',
     'Cache-Control': 'no-store',
     ...extra
