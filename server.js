@@ -115,10 +115,19 @@ function pipeStream(streamUrl, req, res, streamCors){
       ...(req.headers.range ? { Range: req.headers.range } : {})
     }
   }, (upstreamRes) => {
-    // Follow a single redirect hop, same as fetchUrl() above.
+    // Follows redirects recursively (each hop re-enters this same
+    // function), not just one — unlike fetchUrl() above, which really is
+    // single-hop-only.
     if(upstreamRes.statusCode >= 300 && upstreamRes.statusCode < 400 && upstreamRes.headers.location){
       upstreamRes.resume();
       return pipeStream(new URL(upstreamRes.headers.location, streamUrl).toString(), req, res, streamCors);
+    }
+    if(upstreamRes.statusCode >= 400){
+      // Not a network-level failure — the upstream host itself rejected
+      // the request (e.g. anti-bot/hotlink protection blocking Render's
+      // IP, or the file genuinely being gone). Log it since this is
+      // otherwise invisible: the client just sees its <audio> load fail.
+      console.log(`/stream upstream error ${upstreamRes.statusCode} for ${streamUrl}`);
     }
     res.writeHead(upstreamRes.statusCode, {
       'Content-Type': upstreamRes.headers['content-type'] || 'audio/mpeg',
@@ -135,7 +144,10 @@ function pipeStream(streamUrl, req, res, streamCors){
   // Only bound the time to get a response; once piping starts, let it run
   // for the life of playback — never apply a timeout to the pipe itself.
   upstreamReq.setTimeout(REQUEST_TIMEOUT_MS, () => upstreamReq.destroy(new Error('Upstream connection timed out')));
-  upstreamReq.on('error', (e) => { if(!res.headersSent) sendJson(res, 502, { error: String(e && e.message || e) }); });
+  upstreamReq.on('error', (e) => {
+    console.log(`/stream upstream connection error for ${streamUrl}: ${e && e.message || e}`);
+    if(!res.headersSent) sendJson(res, 502, { error: String(e && e.message || e) });
+  });
   req.on('close', () => upstreamReq.destroy());
   upstreamReq.end();
 }
