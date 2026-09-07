@@ -190,7 +190,12 @@ const server = http.createServer(async (req, res) => {
       return res.end();
     }
     if(!checkStreamAuth(req)){
-      res.writeHead(401, { 'WWW-Authenticate': 'Basic realm="stream-proxy"', ...streamCors });
+      // Deliberately omitting WWW-Authenticate: sending it makes browsers
+      // (including in-car WebViews) pop their own native login dialog on a
+      // failed <audio> load, which the app has no control over and which
+      // blocks the UI. The credentials are still required and validated
+      // above — this only changes what the browser does on failure.
+      res.writeHead(401, streamCors);
       return res.end();
     }
     const ip = (req.headers['x-forwarded-for'] || '').split(',')[0].trim() || req.socket.remoteAddress;
