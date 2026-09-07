@@ -96,20 +96,47 @@ function isStreamRateLimited(ip){
   return entry.count > STREAM_RATE_LIMIT_PER_MIN;
 }
 
-function checkStreamAuth(req){
+function checkStreamAuth(req, reqUrl){
   if(!STREAM_PROXY_USER || !STREAM_PROXY_PASS) return false; // fail closed if unconfigured
+
+  // Primary path: a real Authorization header (used by fetch()-based
+  // callers like the Settings "Test connection" button).
   const [scheme, encoded] = (req.headers.authorization || '').split(' ');
-  if(scheme !== 'Basic' || !encoded) return false;
-  let decoded;
-  try{ decoded = Buffer.from(encoded, 'base64').toString('utf8'); }catch{ return false; }
-  const sep = decoded.indexOf(':');
-  if(sep === -1) return false;
-  return decoded.slice(0, sep) === STREAM_PROXY_USER && decoded.slice(sep + 1) === STREAM_PROXY_PASS;
+  if(scheme === 'Basic' && encoded){
+    let decoded;
+    try{ decoded = Buffer.from(encoded, 'base64').toString('utf8'); }catch{ decoded = ''; }
+    const sep = decoded.indexOf(':');
+    if(sep !== -1 && decoded.slice(0, sep) === STREAM_PROXY_USER && decoded.slice(sep + 1) === STREAM_PROXY_PASS){
+      return true;
+    }
+  }
+
+  // Fallback path: plain ?user=&pass= query params. A native <audio src>
+  // load can't set custom headers, and relies on the browser converting
+  // userinfo embedded in the URL (https://user:pass@host/...) into a real
+  // Authorization header — which turns out to be unreliable in at least
+  // one real in-car WebView (confirmed: no Authorization header arrives,
+  // no way to distinguish that from wrong credentials from here). Query
+  // params have no such browser-dependent behavior, so this is what the
+  // client actually uses for playback; the header path above stays for
+  // fetch()-based calls that can set headers directly.
+  if(reqUrl){
+    const user = reqUrl.searchParams.get('user');
+    const pass = reqUrl.searchParams.get('pass');
+    if(user === STREAM_PROXY_USER && pass === STREAM_PROXY_PASS) return true;
+  }
+
+  return false;
 }
 
 function pipeStream(streamUrl, req, res, streamCors){
   const lib = streamUrl.startsWith('https:') ? https : http;
   const upstreamReq = lib.request(streamUrl, {
+    // Each stream is its own long-lived, high-bandwidth connection — not a
+    // good candidate for Node's default keep-alive pooling, which was
+    // observed to desync ("Parse Error: Expected HTTP/...") when a socket
+    // got reused across overlapping stream requests.
+    agent: false,
     headers: {
       'User-Agent': 'Mozilla/5.0 (compatible; AutopodProxy/1.0)',
       ...(req.headers.range ? { Range: req.headers.range } : {})
@@ -145,8 +172,14 @@ function pipeStream(streamUrl, req, res, streamCors){
   // for the life of playback — never apply a timeout to the pipe itself.
   upstreamReq.setTimeout(REQUEST_TIMEOUT_MS, () => upstreamReq.destroy(new Error('Upstream connection timed out')));
   upstreamReq.on('error', (e) => {
-    console.log(`/stream upstream connection error for ${streamUrl}: ${e && e.message || e}`);
-    if(!res.headersSent) sendJson(res, 502, { error: String(e && e.message || e) });
+    // Only log/report this as a real failure if we hadn't already served a
+    // response — some sources (e.g. Icecast) log a harmless parse
+    // complaint on the leftover socket after a short Range request has
+    // already been satisfied and torn down, which isn't an actual failure.
+    if(!res.headersSent){
+      console.log(`/stream upstream connection error for ${streamUrl}: ${e && e.message || e}`);
+      sendJson(res, 502, { error: String(e && e.message || e) });
+    }
   });
   req.on('close', () => upstreamReq.destroy());
   upstreamReq.end();
@@ -198,20 +231,23 @@ const server = http.createServer(async (req, res) => {
     const streamCors = corsHeaders({ 'Access-Control-Allow-Origin': allowedOrigin });
 
     if(origin && !ALLOWED_STREAM_ORIGINS.includes(origin)){
+      console.log(`/stream 403 origin blocked: ${origin}`);
       res.writeHead(403, streamCors);
       return res.end();
     }
-    if(!checkStreamAuth(req)){
+    if(!checkStreamAuth(req, reqUrl)){
       // Deliberately omitting WWW-Authenticate: sending it makes browsers
       // (including in-car WebViews) pop their own native login dialog on a
       // failed <audio> load, which the app has no control over and which
       // blocks the UI. The credentials are still required and validated
       // above — this only changes what the browser does on failure.
+      console.log(`/stream 401 auth failed (has auth header: ${!!req.headers.authorization}, has user/pass params: ${reqUrl.searchParams.has('user')})`);
       res.writeHead(401, streamCors);
       return res.end();
     }
     const ip = (req.headers['x-forwarded-for'] || '').split(',')[0].trim() || req.socket.remoteAddress;
     if(isStreamRateLimited(ip)){
+      console.log(`/stream 429 rate limited: ${ip}`);
       res.writeHead(429, streamCors);
       return res.end();
     }
