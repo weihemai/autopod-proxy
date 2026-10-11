@@ -8,6 +8,7 @@
  * doesn't apply) and relays the result with permissive CORS headers.
  *
  * Routes:
+ *   GET /ping                     -> no-op wake-up ping, see below
  *   GET /search?q=<term>          -> proxies itunes.apple.com/search
  *   GET /feed?url=<feed url>      -> proxies an arbitrary RSS/Atom feed
  *   GET /stream?url=<audio url>   -> pipes an audio stream through (China
@@ -192,6 +193,15 @@ const server = http.createServer(async (req, res) => {
   }
 
   const reqUrl = new URL(req.url, `http://${req.headers.host}`);
+
+  if(reqUrl.pathname === '/ping'){
+    // Cheap, no-op wake-up endpoint: the app calls this at startup to warm
+    // up this service's Render free-tier dyno ahead of an actual search/
+    // feed/stream request, since those would otherwise eat the cold-start
+    // delay. Deliberately does no real work (no external fetch) so it
+    // can't itself be a source of slowness or count against any budget.
+    return sendJson(res, 200, { ok: true });
+  }
 
   if(reqUrl.pathname === '/search'){
     const q = reqUrl.searchParams.get('q');
